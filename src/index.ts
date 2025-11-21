@@ -1,12 +1,132 @@
-import express from 'express';
+import express, { Request, Response } from 'express';
+import dotenv from 'dotenv';
+import upscalerRoutes from './routes/upscaler.routes';
+
+dotenv.config();
+
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => {
-  const name = process.env.NAME || 'World';
-  res.send(`Hello ${name}!`);
+// Middleware to handle JSON with larger payload (for base64 images)
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+
+// CORS middleware (optional, for frontend access)
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
 });
 
-const port = parseInt(process.env.PORT || '3000');
-app.listen(port, () => {
-  console.log(`listening on port ${port}`);
+// Health check endpoint
+app.get('/health', (req: Request, res: Response) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    memoryUsage: {
+      heapUsed: `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB`,
+      heapTotal: `${(process.memoryUsage().heapTotal / 1024 / 1024).toFixed(2)} MB`,
+    },
+  });
 });
+
+// Root endpoint with API documentation
+app.get('/', (req: Request, res: Response) => {
+  res.json({
+    message: 'Image Upscaler API - Dynamic Model Selection',
+    version: '2.0.0',
+    author: 'CodingMantra',
+    endpoints: {
+      health: 'GET /health',
+      upscale: 'POST /upscale',
+    },
+    usage: {
+      method: 'POST',
+      endpoint: '/upscale',
+      contentType: 'application/json',
+      body: {
+        image: 'base64 string (required, with or without image prefix)',
+        model: 'number (optional: 2, 3, 4, or 8 - default: 4)',
+      },
+      example: {
+        image: 'image/png;base64,iVBORw0KGgo...',
+        model: 4,
+      },
+    },
+    models: {
+      2: { scale: '2x', recommended: 'Fast processing, good for large images' },
+      3: { scale: '3x', recommended: 'Balanced quality and speed' },
+      4: { scale: '4x', recommended: 'Default - Best balance (recommended)' },
+      8: { scale: '8x', recommended: 'Highest quality, slower, small images only' },
+    },
+    limits: {
+      maxPayloadSize: '50MB',
+      maxImageDimensions: {
+        '2x': '2048x2048',
+        '3x': '1536x1536',
+        '4x': '1024x1024',
+        '8x': '512x512',
+      },
+    },
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.use('/api', upscalerRoutes);
+
+// 404 handler
+app.use((req: Request, res: Response) => {
+  res.status(404).json({
+    error: 'Endpoint not found',
+    availableEndpoints: ['GET /', 'GET /health', 'POST /upscale'],
+  });
+});
+
+// Global error handler
+app.use((err: Error, req: Request, res: Response, next: Function) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({
+    success: false,
+    error: 'Internal server error',
+    message: err.message,
+  });
+});
+
+
+// Start server
+const server = app.listen(PORT, () => {
+  console.log('🚀 ================================================');
+  console.log(`🚀 Image Upscaler API v2.0 - CodingMantra`);
+  console.log(`🚀 Server: http://localhost:${PORT}`);
+  console.log(`🚀 ================================================`);
+  console.log(`📊 Health: http://localhost:${PORT}/health`);
+  console.log(`🖼️  Upscale: http://localhost:${PORT}/upscale`);
+  console.log(`📝 Models: 2x, 3x, 4x (default), 8x`);
+  console.log(`📦 Max Payload: 50MB`);
+  console.log('🚀 ================================================');
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('⚠️  SIGTERM received, shutting down gracefully...');
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('⚠️  SIGINT received, shutting down gracefully...');
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+
+export default app;
