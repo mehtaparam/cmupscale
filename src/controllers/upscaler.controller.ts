@@ -10,12 +10,11 @@ const x3Model = require('@upscalerjs/esrgan-thick/3x');
 const x4Model = require('@upscalerjs/esrgan-thick/4x');
 const x8Model = require('@upscalerjs/esrgan-thick/8x');
 
-// Model map for easy selection
-const MODEL_MAP = {
-  2: x2Model,
-  3: x3Model,
-  4: x4Model,
-  8: x8Model,
+const UPSCALERS = {
+  2: new Upscaler({ model: x2Model }),
+  3: new Upscaler({ model: x3Model }),
+  4: new Upscaler({ model: x4Model }),
+  8: new Upscaler({ model: x8Model }),
 };
 
 // Type for valid model scales
@@ -45,7 +44,6 @@ interface UpscaleResponse {
 // Helper function to extract base64 data from data URI
 function extractBase64Data(dataUri: string): string {
   if (dataUri.startsWith('')) {
-    // Remove image/png;base64, or similar prefix
     return dataUri.split(',')[1];
   }
   return dataUri;
@@ -75,27 +73,52 @@ async function tensorToBase64(
   return `${mimeType};base64,${base64String}`;
 }
 
-// Helper function to get upscaler instance for specific model
-function getUpscaler(modelScale: ModelScale) {
-  const model = MODEL_MAP[modelScale];
-  if (!model) {
-    throw new Error(`Invalid model scale: ${modelScale}`);
-  }
-  return new Upscaler({ model });
-}
-
 // Validate model scale
 function isValidModelScale(scale: any): scale is ModelScale {
   return [2, 3, 4, 8].includes(scale);
 }
 
+export const warmupModels = async () => {
+  for (const scale in UPSCALERS) {
+    const upscaler = UPSCALERS[scale as unknown as keyof typeof UPSCALERS];
+    // Create dummy tensor, e.g., 16x16 black image
+    const dummy = tf.zeros([16, 16, 3], 'int32');
+    await upscaler.upscale(dummy);
+    dummy.dispose();
+    console.log(`Model ${scale}x warmed up`);
+  }
+}
+
+// Maximum input size allowed by each model (width or height)
+const MAX_DIMENSION_BY_MODEL: Record<Exclude<ModelScale, 'auto'>, number> = {
+  2: 2048,
+  3: 1536,
+  4: 1024,
+  8: 512,
+};
+
+// Helper: find max supported model scale fitting image size
+function selectAutoModel(width: number, height: number): Exclude<ModelScale, 'auto'> | null {
+  for (const scale of [8, 4, 3, 2] as Exclude<ModelScale, 'auto'>[]) {
+    const maxDim = MAX_DIMENSION_BY_MODEL[scale];
+    if (width <= maxDim && height <= maxDim) {
+      return scale;
+    }
+  }
+  return null; // Too large for all models
+}
+
+
 export const upscaleImage = async (req: Request, res: Response) => {
+
+  console.log('TF Backend in use:', tf.getBackend());  // Should show "tensorflow"
+  
   const startTime = Date.now();
   let imageTensor: tf.Tensor3D | null = null;
   let upscaledTensor: tf.Tensor | null = null;
 
   try {
-    const { image, model = 4 }: UpscaleRequest = req.body;
+    let { image, model = 'auto' } = req.body as UpscaleRequest;
 
     // Validate image
     if (!image || typeof image !== 'string') {
@@ -107,10 +130,7 @@ export const upscaleImage = async (req: Request, res: Response) => {
 
     // Validate model scale
     if (!isValidModelScale(model)) {
-      return res.status(400).json({
-        success: false,
-        error: `Invalid model scale: ${model}. Must be 2, 3, 4, or 8`,
-      } as UpscaleResponse);
+      model = 'auto';
     }
 
     console.log(`🖼️  Processing image upscale request with ${model}x model...`);
@@ -118,34 +138,49 @@ export const upscaleImage = async (req: Request, res: Response) => {
     // Memory before processing
     const memBefore = process.memoryUsage();
     console.log(
-      `💾 Memory before: ${(memBefore.heapUsed / 1024 / 1024).toFixed(2)} MB`
+      `💾 Memory used before: ${(memBefore.heapUsed / 1024 / 1024).toFixed(2)} MB`
     );
 
     // Decode base64 to tensor
     imageTensor = await base64ToTensor(image);
-    const [originalHeight, originalWidth] = imageTensor.shape;
-    console.log(`📐 Original size: ${originalWidth}x${originalHeight}`);
+    const [height, width] = imageTensor.shape;
+    console.log(`📐 Original size: ${width}x${height}`);
+    // Determine model scale
+    let modelScale: Exclude<ModelScale, 'auto'>;
 
-    // Optional: Add size validation for large models
-    const MAX_DIMENSION_BY_MODEL: Record<ModelScale, number> = {
-      2: 2048,
-      3: 1536,
-      4: 1024,
-      8: 512,
-    };
-
-    const maxDimension = MAX_DIMENSION_BY_MODEL[model];
-    if (originalWidth > maxDimension || originalHeight > maxDimension) {
-      if (imageTensor) imageTensor.dispose();
+    if (model === 'auto') {
+      const detectedModel = selectAutoModel(width, height);
+      if (!detectedModel) {
+        imageTensor.dispose();
+        return res.status(400).json({
+          success: false,
+          error: 'Image too large for all supported models',
+          message: `Maximum allowed dimension for 2x model: ${MAX_DIMENSION_BY_MODEL[2]}px`,
+        });
+      }
+      modelScale = detectedModel;
+      console.log(`Auto model selected: ${modelScale}x for image ${width}x${height}`);
+    } else if (isValidModelScale(model)) {
+      modelScale = model;
+      const maxDim = MAX_DIMENSION_BY_MODEL[modelScale];
+      if (width > maxDim || height > maxDim) {
+        imageTensor.dispose();
+        return res.status(400).json({
+          success: false,
+          error: `Image too large for ${modelScale}x model`,
+          message: `Maximum dimension: ${maxDim}px. Current size: ${width}x${height}`,
+        });
+      }
+    } else {
+      imageTensor.dispose();
       return res.status(400).json({
         success: false,
-        error: `Image too large for ${model}x model`,
-        message: `Maximum dimension: ${maxDimension}px. Current: ${originalWidth}x${originalHeight}`,
-      } as UpscaleResponse);
+        error: `Invalid model value: ${model}. Must be 2, 3, 4, 8 or 'auto'`,
+      });
     }
 
-    // Get upscaler with selected model
-    const upscaler = getUpscaler(model);
+    // Get upscaler instance
+    const upscaler = UPSCALERS[modelScale];
 
     // Upscale the image
     upscaledTensor = await upscaler.upscale(imageTensor);
@@ -163,7 +198,7 @@ export const upscaleImage = async (req: Request, res: Response) => {
     const memAfter = process.memoryUsage();
     const memoryUsed = ((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024).toFixed(2);
     console.log(`💾 Memory after: ${(memAfter.heapUsed / 1024 / 1024).toFixed(2)} MB`);
-    console.log(`💾 Memory used: ${memoryUsed} MB`);
+    console.log(`💾 Total Memory used: ${memoryUsed} MB`);
 
     const processingTime = Date.now() - startTime;
     console.log(`✅ Processing completed in ${processingTime}ms`);
@@ -173,7 +208,7 @@ export const upscaleImage = async (req: Request, res: Response) => {
       upscaledImage: upscaledBase64,
       message: 'Image upscaled successfully',
       meta: {
-        originalSize: { width: originalWidth, height: originalHeight },
+        originalSize: { width: height, height: width },
         upscaledSize: { width: upscaledWidth, height: upscaledHeight },
         modelUsed: model,
         processingTime,

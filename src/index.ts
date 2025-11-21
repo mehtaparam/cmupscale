@@ -1,11 +1,17 @@
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import upscalerRoutes from './routes/upscaler.routes';
+import { warmupModels } from './controllers/upscaler.controller';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+// Log memory configuration on startup
+const maxOldSpaceSize = process.env.NODE_OPTIONS?.match(/--max-old-space-size=(\d+)/)?.[1];
+console.log('💾 Memory Configuration:');
+console.log(`   Max Old Space Size: ${maxOldSpaceSize ? maxOldSpaceSize + 'MB' : 'Default (~2GB)'}`);
+console.log(`   Current Heap Limit: ${(require('v8').getHeapStatistics().heap_size_limit / (1024 * 1024)).toFixed(0)} MB`);
 
 // Middleware to handle JSON with larger payload (for base64 images)
 app.use(express.json({ limit: '100mb' }));
@@ -22,32 +28,58 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check endpoint
+// CORS middleware (optional, for frontend access)
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// Health check endpoint with detailed memory info
 app.get('/health', (req: Request, res: Response) => {
+  const memoryUsage = process.memoryUsage();
+  const v8Stats = require('v8').getHeapStatistics();
+
   res.status(200).json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
     memoryUsage: {
-      heapUsed: `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB`,
-      heapTotal: `${(process.memoryUsage().heapTotal / 1024 / 1024).toFixed(2)} MB`,
+      heapUsed: `${(memoryUsage.heapUsed / 1024 / 1024).toFixed(2)} MB`,
+      heapTotal: `${(memoryUsage.heapTotal / 1024 / 1024).toFixed(2)} MB`,
+      heapLimit: `${(v8Stats.heap_size_limit / 1024 / 1024).toFixed(0)} MB`,
+      external: `${(memoryUsage.external / 1024 / 1024).toFixed(2)} MB`,
+      rss: `${(memoryUsage.rss / 1024 / 1024).toFixed(2)} MB`,
+      usagePercentage: `${((memoryUsage.heapUsed / v8Stats.heap_size_limit) * 100).toFixed(2)}%`,
     },
   });
 });
 
 // Root endpoint with API documentation
 app.get('/', (req: Request, res: Response) => {
+  const v8Stats = require('v8').getHeapStatistics();
+
   res.json({
     message: 'Image Upscaler API - Dynamic Model Selection',
     version: '2.0.0',
     author: 'CodingMantra',
     endpoints: {
       health: 'GET /health',
-      upscale: 'POST /upscale',
+      upscale: 'POST /api/upscale',
+    },
+    systemInfo: {
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      heapLimit: `${(v8Stats.heap_size_limit / 1024 / 1024).toFixed(0)} MB`,
     },
     usage: {
       method: 'POST',
-      endpoint: '/upscale',
+      endpoint: '/api/upscale',
       contentType: 'application/json',
       body: {
         image: 'base64 string (required, with or without image prefix)',
@@ -65,7 +97,7 @@ app.get('/', (req: Request, res: Response) => {
       8: { scale: '8x', recommended: 'Highest quality, slower, small images only' },
     },
     limits: {
-      maxPayloadSize: '50MB',
+      maxPayloadSize: '100MB',
       maxImageDimensions: {
         '2x': '2048x2048',
         '3x': '1536x1536',
@@ -105,11 +137,13 @@ const server = app.listen(PORT, () => {
   console.log(`🚀 Server: http://localhost:${PORT}`);
   console.log(`🚀 ================================================`);
   console.log(`📊 Health: http://localhost:${PORT}/health`);
-  console.log(`🖼️  Upscale: http://localhost:${PORT}/upscale`);
+  console.log(`🖼️  Upscale: http://localhost:${PORT}/api/upscale`);
   console.log(`📝 Models: 2x, 3x, 4x (default), 8x`);
-  console.log(`📦 Max Payload: 50MB`);
+  console.log(`📦 Max Payload: 100MB`);
+  console.log(`💾 Heap Limit: ${(require('v8').getHeapStatistics().heap_size_limit / 1024 / 1024).toFixed(0)} MB`);
   console.log('🚀 ================================================');
 });
+
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
@@ -127,6 +161,8 @@ process.on('SIGINT', () => {
     process.exit(0);
   });
 });
+
+warmupModels()
 
 
 export default app;

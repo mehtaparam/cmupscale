@@ -7,12 +7,15 @@
   "scripts": {
     "dev": "nodemon --watch 'src/**' --ext 'ts,json' --exec 'npm run build && npm run start'",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node --max-old-space-size=4096 dist/index.js",
+    "start:8gb": "node --max-old-space-size=8192 dist/index.js",
+    "start:16gb": "node --max-old-space-size=16384 dist/index.js"
   },
   "author": "Google LLC",
   "license": "Apache-2.0",
   "dependencies": {
     "@tensorflow/tfjs-node": "^4.22.0",
+    "@tensorflow/tfjs-node-gpu": "^4.22.0",
     "@types/multer": "^2.0.0",
     "@upscalerjs/esrgan-thick": "^1.0.0-beta.16",
     "dotenv": "^17.2.3",
